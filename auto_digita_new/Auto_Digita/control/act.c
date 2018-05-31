@@ -1,0 +1,712 @@
+#include "act.h"
+
+
+__CYL_ACT_t cylAct = {.basicCylState = CYL_IDLE};//底盘传过来的最高优先级气缸动作
+__ASS_CON_ACT_t assConActSet = {.left_roate = NULL_POS,
+																.right_roate = NULL_POS};//从主控接收转交给辅控的数据
+__ASS_CON_ACT_t assConActGet; 
+
+uint8_t fCOM = IDLE;
+uint8_t fLASER = IDLE;
+
+//断开通信的时间
+static uint32_t lost2AssCon = 0;
+static uint32_t lost2MasCon = 0;
+
+
+void FeedDog(uint8_t i)
+{
+	if(i == ASS_CON)
+		lost2AssCon = 0;
+	else if(i == MAS_CON)
+		lost2MasCon = 0;
+}
+
+void CheckCommunication(uint8_t time)
+{
+	lost2AssCon += time;
+	lost2MasCon += time;
+
+	if((lost2AssCon >= 90) || (lost2MasCon >= 60))
+		fCOM = LOST;
+	else
+		fCOM = SET;
+}
+
+void LASER_StartMesure()
+{
+	if(fLASER == LASER_START)
+	{
+		Calculate_Position();
+		fLASER = LASER_FINISH;
+	}
+}
+
+
+void CYLINDER_BaseAct(uint8_t group,  uint8_t type,  uint8_t state)
+{
+	uint8_t i = 0;
+	for(i = 0;i < 10; i++)
+	{
+		if((cylRegistry[i].group == group || group == CYL_GROUP_BOTH) && 
+			(cylRegistry[i].type == type || type == CYL_TYPE_BOTH))
+			cylRegistry[i].pSwitch(state);
+	}
+}
+
+void HighPriorityCylAct()
+{
+	CYLINDER_BaseAct(cylAct.basicCylGroup,  cylAct.basicCylType,  cylAct.basicCylState);
+}
+/**
+ * [LIMITSWITCH_WaitChange description]
+ * @param  switchPinPort GPIOx
+ * @param  switchPinNum  GPIO_Pin
+ * @param  waitMs        延时几毫秒
+ * @return               1=成功 0=超时
+ */
+uint8_t LIMITSWITCH_WaitChange(__LIMITSWITCH_REG_t *sw ,  uint32_t waitMs)
+{
+	u32 temp = SysTick->CTRL;
+	
+	if(temp&0x01)//说明有其他在使用滴答定时器，采用软延时
+	{
+		temp = 7000*waitMs;//软延时不准，觉得长减小这个
+
+		if(sw == NULL)
+		{
+			while(temp)
+				temp--;
+			return 1;
+		}
+		else
+		{
+     		while((sw->pRead() == SWITCH_ON)&&temp)
+				temp--;
+		}
+
+     	if(temp == 0)
+     		return 0;
+     	else
+     		return 1;
+	}
+	else
+	{
+		SysTick->LOAD=(u32)waitMs*fac_ms;				//时间加载(SysTick->LOAD为24bit)
+		SysTick->VAL =0x00;							//清空计数器
+		SysTick->CTRL|=SysTick_CTRL_ENABLE_Msk;		//开始倒数
+
+		if(sw == NULL)
+		{
+			do{
+				temp = SysTick->CTRL;		
+			}while((temp&0x01)&&!(temp&(1<<16)));
+
+			SysTick->CTRL&=~SysTick_CTRL_ENABLE_Msk;	//关闭计数器
+			SysTick->VAL =0X00;       					//清空计数器
+
+			return 1;
+		}
+		else
+		{
+			do{
+				temp = SysTick->CTRL;
+			}while((sw->pRead()  == SWITCH_ON)&&
+					((temp&0x01)&&!(temp&(1<<16))) );
+		}
+		
+		if(!(temp&(1<<16)))//没到时间说明限位开关触发成功
+		{
+			SysTick->CTRL&=~SysTick_CTRL_ENABLE_Msk;	//关闭计数器
+			SysTick->VAL =0X00;       					//清空计数器
+
+			return 	1;
+		}
+		else
+		{
+			SysTick->CTRL&=~SysTick_CTRL_ENABLE_Msk;	//关闭计数器
+			SysTick->VAL =0X00;       					//清空计数器
+
+			return 0;
+		}  
+	}
+}
+
+void RoateControl(uint8_t pos, uint8_t group)
+{
+	if(group==LEFT_GROUP)
+	{
+		assConActSet.left_roate = pos;
+		while(assConActGet.left_roate != pos);
+	}
+	else
+	{
+		assConActSet.right_roate = pos;
+		while(assConActGet.right_roate != pos);
+	}	
+}
+
+void RoateControl_noACK(uint8_t pos, uint8_t group)
+{
+	if(group==LEFT_GROUP)
+	{
+		assConActSet.left_roate = pos;
+	}
+	else
+	{
+		assConActSet.right_roate = pos;
+	}
+
+	
+}
+
+//void PressureControl(uint8_t pre)
+//{
+//	assConActSet.pressure = pre;
+//}
+
+
+/************************下为比赛所需实际动作*************************/
+void f_NORM_BALL_CATCH(void)   //暂时未加球数判断
+{
+	RoateControl(CATCH_POS,LEFT_GROUP);
+	//可能要加刷新光电对管状态
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW_UP, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW_DOWN, CYL_OFF);
+	//等待光电开关
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW_UP, CYL_ON);
+	delay_ms(1300);
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW_DOWN, CYL_ON);
+	delay_ms(3000);
+	RoateControl(LAUNCH_POS,LAUNCH_POS);
+	delay_ms(500);
+	//此时shining_flag置一
+}
+
+
+void GOLDEN_BALL_STORE(void)
+{
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW_UP, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW_UP, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW_DOWN, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW_DOWN, CYL_OFF);
+	
+	
+
+/*********************************************************************/
+void f_FETCH_LEFT_BALL()
+{
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+	LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+	LIMITSWITCH_WaitChange(NULL, 4*DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+}
+
+void f_FETCH_RIGHT_BALL()
+{
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+	LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+	LIMITSWITCH_WaitChange(NULL, 4*DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+}
+
+void f_FETCH_BOTH_BALL()
+{
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+	LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+	LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+	LIMITSWITCH_WaitChange(NULL, 4*DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);	
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+}
+
+void f_PASS_NORMAL_BALL_1()
+{
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+	LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+
+	LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+
+	fPROCESS.ballNum --;
+}
+
+void f_PASS_NORMAL_BALL_2()
+{
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+	LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+
+	LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+
+	fPROCESS.ballNum --;
+}
+
+void f_PASS_GOLDEN_BALL()
+{
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+	LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+	LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+	LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+
+	fPROCESS.ballNum = 0;
+}
+
+void f_NORM_HANDOVER_STEP1()
+{
+	RoateControl(PASS_NORMAL_BALL_1_R);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+	LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+	LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+
+	fPROCESS.ballNum --;
+	RoateControl(PASS_NORMAL_BALL_2_R);
+}
+
+void f_NORM_HANDOVER_STEP2()
+{
+	RoateControl(PASS_NORMAL_BALL_2_R);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+	LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+	LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+
+	fPROCESS.ballNum --;
+}
+
+void f_GOLDEN_HANDOVER()
+{
+	RoateControl(PASS_GOLDEN_BALL_R);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+	LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+	LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+	LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+
+	fPROCESS.ballNum = 0;
+}
+
+void f_PUSH_LEFT_CLAW()
+{
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+
+}
+
+void f_PUSH_RIGHT_CLAW()
+{
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+}
+
+void f_PUSH_BOTH_CLAW()
+{
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+}
+
+void f_PULL_LEFT_CLAW()
+{
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+}
+
+void f_PULL_RIGHT_CLAW()
+{
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+}
+
+void f_PULL_BOTH_CLAW()
+{
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+	LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+}
+
+void f_REFERSH_ACT()
+{
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+	CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+
+	RoateControl(FETCH_BALL_R);
+}
+
+void f_NORMAL_SHELF()
+{
+	RoateControl(FETCH_BALL_R);
+	f_FETCH_BOTH_BALL();
+}
+
+void f_MID_TZ1()
+{
+	RoateControl(PASS_NORMAL_BALL_1_R);
+}
+
+void f_GOLDEN_SHELF()
+{
+	RoateControl(FETCH_BALL_R);
+	f_FETCH_BOTH_BALL();
+}
+
+void f_MID_TZ2()
+{
+	RoateControl(PASS_GOLDEN_BALL_R);
+}
+
+void f_NONE_ACT()
+{
+
+}
+
+void f_TZ1()
+{
+
+}
+
+void f_TZ2_NORMAL()
+{
+
+}
+
+void f_TZ2_GOLDEN()
+{
+	
+}
+/*
+void SimpleSylinderAct(uint8_t act)
+{
+	switch(act)
+	{
+		case FETCH_LEFT_BALL:
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+			LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+			LIMITSWITCH_WaitChange(NULL, 4*DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case FETCH_RIGHT_BALL:
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+			LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+			LIMITSWITCH_WaitChange(NULL, 4*DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case FETCH_BOTH_BALL:
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+			LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+			LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+			LIMITSWITCH_WaitChange(NULL, 4*DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);	
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+
+		Cylinder_action = CYL_OFF;		
+		break;
+
+		case PASS_NORMAL_BALL_1:
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+			LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+
+			LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+
+		fPROCESS.ballNum --;
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case PASS_NORMAL_BALL_2:
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+			LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+
+			LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+
+		Current_ball_num --;
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case PASS_GOLDEN_BALL:
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+			LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+			LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+			LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+
+		Current_ball_num = 0;
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case NORM_HANDOVER_STEP1:
+			RoateControl(Pass_normal_ball_1_pos);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+			LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+			LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+
+		Current_ball_num --;
+		RoateControl(Pass_normal_ball_2_pos);
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case NORM_HANDOVER_STEP2:
+			RoateControl(Pass_normal_ball_2_pos);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+			LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+			LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+
+		Current_ball_num --;
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case GOLDEN_HANDOVER:
+			RoateControl(Pass_golden_ball_pos);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+			LIMITSWITCH_WaitChange(&lswLeft, DELAY_LINE);
+			LIMITSWITCH_WaitChange(&lswRight, DELAY_LINE);
+			LIMITSWITCH_WaitChange(NULL, DELAY_AUTO);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+
+		Current_ball_num = 0;
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case PUSH_LEFT_CLAW:
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case PUSH_RIGHT_CLAW:
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case PUSH_BOTH_CLAW:
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_ON);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_ON);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_ON);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_ON);
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case PULL_LEFT_CLAW:
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case PULL_RIGHT_CLAW:
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case PULL_BOTH_CLAW:
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+			LIMITSWITCH_WaitChange(NULL, DELAY_CLAW);
+
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+		Cylinder_action = CYL_OFF;
+		break;
+
+		case REFERSH_ACT:
+		Wait_CMD_CYL_OFF();
+		Tele_control_CMD = CYL_OFF;
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_CLAW, CYL_OFF);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_CLAW, CYL_OFF);
+			CYLINDER_BaseAct(CYL_GROUP_LEFT, CYL_TYPE_LINE, CYL_OFF);
+			CYLINDER_BaseAct(CYL_GROUP_RIGHT, CYL_TYPE_LINE, CYL_OFF);
+
+			RoateControl(Fetch_ball_pos);
+		Cylinder_action = CYL_OFF;
+		break;
+
+		default:
+		break;
+	}	
+}
+*/
+

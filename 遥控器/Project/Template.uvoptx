@@ -313,6 +313,11 @@
           <WinNumber>1</WinNumber>
           <ItemText>(Rotate_value&amp;0x08)</ItemText>
         </Ww>
+        <Ww>
+          <count>26</count>
+          <WinNumber>1</WinNumber>
+          <ItemText>\\Template\../Drivers/src/InterfaceToF103.c\F1_Tx_Buffer.TxBuffer.verify</ItemText>
+        </Ww>
       </WatchWindow1>
       <WatchWindow2>
         <Ww>

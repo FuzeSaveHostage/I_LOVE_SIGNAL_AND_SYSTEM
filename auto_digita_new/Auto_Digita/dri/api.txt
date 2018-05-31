@@ -1,0 +1,27 @@
+bsp.h包含所有外设驱动
+
+设置了外部晶振输入，如果感觉速度慢9倍，可能没有起振
+
+AllThreadStart 会让所有定时器开始计时
+
+延时：	delay_us
+		delay_ms
+		形参不要太大
+
+can.h   更改CAN_ID和掩码模式
+宏定义CAN_FILTER设为0不过滤ID
+设为0XFFE0过滤11位标准ID
+用CAN_SendMassage(uint16_t ID, uint8_t dataLength, uint8_t *canSendMassage)发送数组，没有发送中断
+
+限位开关或者光电开关
+新加一个需要在 LIMITSWITCH_Registry()这个注册表函数注册
+lswRegistry这个数组最多支持40个，IO就这么多
+注册就是写入光电开关对应的IO GPIO_Pin 和 GPIOx
+如果要等待开关触发 调用 uint8_t LIMITSWITCH_WaitChange(__LIMITSWITCH_REG_t switch, uint32_t waitMs);
+第一个参数就是开关对应的lswRegistry成员
+第二个是等待的时间，由systick计时，如果超时未触发返回0，时限内触发返回1
+
+气缸
+新加一个需要在 CYLINDER_Registry()这个注册表函数注册
+最多支持10个
+每个气缸对应cylRegistry的一个成员，成员可设置group和num，注册只需要设置group和num，气缸开关通过cylRegistry.pSwitch();这个函数指针操作，已指向对应的函数
